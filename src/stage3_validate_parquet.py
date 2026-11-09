@@ -8,7 +8,7 @@ import pyarrow.compute as pc
 
 # Project root is the parent of src/
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed_v2"
 
 # Expected counts from the four raw manifests / normalization logs.
 EXPECTED = {

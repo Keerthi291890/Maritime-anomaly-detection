@@ -157,6 +157,9 @@ ENV/
 env.bak/
 venv.bak/
 
+#Data
+data/
+
 # Spyder project settings
 .spyderproject
 .spyproject
@@ -216,3 +219,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+data/raw/
+data/processed/
+data/processed_v2/
+/help_output.txt
+/src/omp_test
+/src/openmp_check.exe

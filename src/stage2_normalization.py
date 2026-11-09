@@ -11,7 +11,7 @@ Events:
     Date: start
 
 Output:
-    data/processed/<dataset>/
+    data/processed_v2/<dataset>/
         region=<region>/
             year=YYYY/
                 month=MM/
@@ -139,15 +139,23 @@ def add_encounter_fields(df):
     )
 
     return df
+
+
 def standardize_nested_columns(df):
     """
-    Convert nested dictionaries/lists into JSON strings.
-
-    This prevents PyArrow from inferring different nested
-    schemas for different monthly Parquet partitions.
+    Convert nested dictionaries/lists to JSON strings.
+    Force optional columns to consistent nullable string types.
+    This prevents partition-specific Parquet schema inference.
     """
 
     df = df.copy()
+
+    known_nested_columns = {
+        "position",
+        "regions",
+        "vessel",
+        "encounter",
+    }
 
     for column in df.columns:
 
@@ -156,42 +164,56 @@ def standardize_nested_columns(df):
 
         non_null = df[column].dropna()
 
-        # Detect columns containing nested structures.
-        has_nested = any(
-            isinstance(value, (dict, list))
-            for value in non_null
+        contains_nested = (
+            column in known_nested_columns
+            or any(
+                isinstance(value, (dict, list))
+                for value in non_null
+            )
         )
 
-        if has_nested:
+        if contains_nested:
 
-            def to_json(value):
-                if value is None or value is pd.NA:
-                    return None
-
-                if isinstance(value, float) and pd.isna(value):
+            def serialize_value(value):
+                if value is None or value is pd.NA or value is pd.NaT:
                     return None
 
                 if isinstance(value, (dict, list)):
                     return json.dumps(
                         value,
                         ensure_ascii=False,
-                        default=str,
+                        default=str
                     )
 
-                return value
+                if pd.isna(value):
+                    return None
 
-            df[column] = df[column].apply(to_json)
+                return json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    default=str
+                )
 
-            # Force a consistent string representation.
-            df[column] = df[column].astype("string")
+            df[column] = (
+                df[column]
+                .apply(serialize_value)
+                .astype("string")
+            )
 
         elif non_null.empty:
-            # An entirely null object column must also
-            # have a consistent type.
             df[column] = df[column].astype("string")
 
         else:
             df[column] = df[column].infer_objects()
+
+    # Ensure transmission-date columns always remain strings,
+    # including partitions where every value is null.
+    for column in [
+        "first_transmission_date",
+        "last_transmission_date",
+    ]:
+        if column in df.columns:
+            df[column] = df[column].astype("string")
 
     return df
 
@@ -210,13 +232,32 @@ def validate_and_prepare(
 
     df = df.copy()
 
-    # Event coordinate extraction
+    # Extract nested event information BEFORE standardization.
     if dataset_name in EVENT_DATASETS:
         df = extract_position(df)
-        # Encounter enrichment
-        df = add_encounter_fields(df)
 
-    # Ensure coordinate columns exist
+        if dataset_name == "encounter_events":
+            df = add_encounter_fields(df)
+
+    # Standardize nested columns BEFORE writing Parquet.
+    df = standardize_nested_columns(df)
+
+    # Temporary diagnostics.
+    for column in [
+        "position",
+        "regions",
+        "vessel",
+        "encounter",
+        "first_transmission_date",
+        "last_transmission_date",
+    ]:
+        if column in df.columns:
+            print(
+                f"    Schema check: {column} = "
+                f"{df[column].dtype}"
+            )
+
+    # Ensure coordinate columns exist.
     for column in ["lat", "lon"]:
         if column not in df.columns:
             df[column] = None
@@ -225,7 +266,7 @@ def validate_and_prepare(
             df[column], errors="coerce"
         )
 
-    # Select the correct date field
+    # Select the correct date field.
     date_col = (
         "date"
         if dataset_name in FOURWINGS_DATASETS
@@ -248,7 +289,7 @@ def validate_and_prepare(
         subset=["lat", "lon", "_dt"]
     ).copy()
 
-    # Geographic coordinate validation
+    # Geographic coordinate validation.
     df = df[
         df["lat"].between(-90, 90)
         & df["lon"].between(-180, 180)
@@ -257,14 +298,12 @@ def validate_and_prepare(
     dropped = before - len(df)
 
     if dropped:
-        print(
-            f"    Dropped {dropped} invalid rows"
-        )
+        print(f"    Dropped {dropped} invalid rows")
 
     if df.empty:
         return df
 
-    # H3 spatial indexing
+    # H3 spatial indexing.
     df["h3_cell"] = [
         h3.latlng_to_cell(
             lat,
@@ -274,11 +313,7 @@ def validate_and_prepare(
         for lat, lon in zip(df["lat"], df["lon"])
     ]
 
-    # Encounter enrichment
-    if dataset_name == "encounter_events":
-        df = add_encounter_fields(df)
-
-    # Provenance metadata
+    # Provenance metadata.
     df["region"] = region_name
     df["pull_id"] = pull_id
     df["source_file"] = source_file
@@ -489,6 +524,34 @@ def process_event_dataset(
     print(f"    Dropped records: {raw_total - written_total:,}")
 
 
+def process_dataset(
+    dataset,
+    region_name,
+    manifest,
+    pull_dir,
+    pull_id,
+):
+    """Process one selected dataset."""
+
+    if dataset in FOURWINGS_DATASETS:
+        process_fourwings_dataset(
+            dataset,
+            region_name,
+            manifest,
+            pull_dir,
+            pull_id,
+        )
+
+    elif dataset in EVENT_DATASETS:
+        process_event_dataset(
+            dataset,
+            region_name,
+            manifest,
+            pull_dir,
+            pull_id,
+        )
+
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -505,14 +568,23 @@ def main():
         default=None,
     )
 
+    parser.add_argument(
+        "--dataset",
+        choices=FOURWINGS_DATASETS + EVENT_DATASETS,
+        default=None,
+        help="Process only the specified dataset",
+    )
+
     args = parser.parse_args()
 
     if args.pull_dir:
         pull_dir = Path(args.pull_dir)
+
     elif args.region_name:
         pull_dir = find_latest_pull_dir(
             args.region_name
         )
+
     else:
         parser.error(
             "Provide --region-name or --pull-dir"
@@ -528,12 +600,13 @@ def main():
                 "Manifest has no region_name. "
                 "Provide --region-name explicitly."
             )
+
         region_name = args.region_name
 
     if args.region_name and args.region_name != region_name:
         raise ValueError(
             f"Region mismatch: argument={args.region_name}, "
-            f"manifest={region_name}"
+            f"manifest={manifest.get('region_name')}"
         )
 
     pull_id = pull_dir.name
@@ -546,23 +619,28 @@ def main():
     print("Pull directory:", pull_dir)
     print("H3 resolution:", H3_RESOLUTION)
 
-    for dataset in FOURWINGS_DATASETS:
-        process_fourwings_dataset(
-            dataset,
+    if args.dataset:
+        print("Selected dataset:", args.dataset)
+
+        process_dataset(
+            args.dataset,
             region_name,
             manifest,
             pull_dir,
             pull_id,
         )
 
-    for dataset in EVENT_DATASETS:
-        process_event_dataset(
-            dataset,
-            region_name,
-            manifest,
-            pull_dir,
-            pull_id,
-        )
+    else:
+        print("Selected dataset: ALL")
+
+        for dataset in FOURWINGS_DATASETS + EVENT_DATASETS:
+            process_dataset(
+                dataset,
+                region_name,
+                manifest,
+                pull_dir,
+                pull_id,
+            )
 
     print("\n===================================")
     print("STAGE 2 COMPLETE")

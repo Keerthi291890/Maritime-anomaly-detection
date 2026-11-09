@@ -2,7 +2,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed_v2"
 
 REGIONS = [
     "argentina",

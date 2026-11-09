@@ -1,0 +1,8 @@
+gfw-api-python-client>=1.4.0
+python-dotenv>=1.0.0
+pandas>=2.2.0
+pyarrow>=16.0.0
+duckdb>=1.0.0
+pyspark>=3.5.0
+h3>=4.0.0
+tqdm>=4.66.0
